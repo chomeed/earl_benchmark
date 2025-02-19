@@ -3,7 +3,7 @@
 TODO: we want to keep track of the number of resets, especially when the environment underneath can return done=True (irreversible set of environments)
 """
 
-from gym import Wrapper
+from gymnasium import Wrapper
 
 class PersistentStateWrapper(Wrapper):
 

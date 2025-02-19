@@ -3,7 +3,7 @@
 TODO: Setup alternate task setting routines beyond random goal sampling at fixed intervals.
 """
 
-from gym import Wrapper
+from gymnasium import Wrapper
 
 class LifelongWrapper(Wrapper):
   '''
