@@ -1,6 +1,7 @@
 """Sawyer environment for opening and closing a door."""
 
 import os
+from gymnasium import spaces
 
 from metaworld.envs.mujoco.utils import reward_utils
 from metaworld.envs.mujoco.sawyer_xyz.v2.sawyer_door_close_v2 import SawyerDoorCloseEnvV2
@@ -17,6 +18,13 @@ class SawyerDoorV2(SawyerDoorCloseEnvV2):
 
   def __init__(self, reward_type='sparse', reset_at_goal=False):
     self._reset_at_goal = reset_at_goal
+    goal_low = (-0.25, 0.45, 0.0999)
+    goal_high = (0.35, 0.85, 0.1001)
+    obj_low = np.full(3, -np.inf)
+    obj_high = np.full(3, +np.inf)
+    gripper_low = -1
+    gripper_high = 1
+  
 
     super().__init__(
       render_mode='rgb_array',
@@ -24,6 +32,12 @@ class SawyerDoorV2(SawyerDoorCloseEnvV2):
       camera_name='doorview',
     )
 
+
+    self.observation_space = spaces.Box(
+      np.hstack((self._HAND_SPACE.low, gripper_low, obj_low, self._HAND_SPACE.low, gripper_low, goal_low)),
+      np.hstack((self._HAND_SPACE.high, gripper_high, obj_high, self._HAND_SPACE.high, gripper_high, goal_high)),
+      dtype=np.float32
+    )
 
     self.init_config = {
         'obj_init_angle': -np.pi / 3 if not self._reset_at_goal \
@@ -65,6 +79,25 @@ class SawyerDoorV2(SawyerDoorCloseEnvV2):
   def model_name(self):
     return os.path.join(
       os.path.dirname(os.path.realpath(__file__)), "metaworld_assets/sawyer_xyz", 'sawyer_door_pull.xml')
+  
+  def _preprocess_obs(self, obs): 
+    # xyz and gripper distance for end effector
+    ee_xyzg_obj_xyz = obs[:7]
+    preprocessed_obs = np.concatenate([
+        ee_xyzg_obj_xyz, self.goal,
+    ])
+    return preprocessed_obs # (14, ) -> then prev_obs assignment causes the problem 
+
+  def step(self, action): 
+    obs, reward, done, truncated, info = super().step(action)
+    obs = self._preprocess_obs(obs)
+    return obs, reward, done, truncated, info 
+  
+  def reset(self): 
+    obs, info = super().reset() 
+    obs = self._preprocess_obs(obs) 
+    return obs, info
+
 
   # need to expose the default goal, useful for multi-goal settings
   def get_next_goal(self):
@@ -98,7 +131,6 @@ class SawyerDoorV2(SawyerDoorCloseEnvV2):
       self._set_obj_xyz(initial_position)
 
     self.reset_goal()
-
     return self._get_obs()
   
   @SawyerDoorCloseEnvV2._Decorators.assert_task_is_set

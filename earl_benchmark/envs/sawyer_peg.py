@@ -6,13 +6,12 @@ The sparse reward function only considers the position of the object, not the po
 import os
 
 import numpy as np
-from gym.spaces import Box
+from gymnasium.spaces import Box
 
-from metaworld.envs import reward_utils
-from metaworld.envs.mujoco.sawyer_xyz.sawyer_xyz_env import SawyerXYZEnv, _assert_task_is_set
+from metaworld.envs.mujoco.utils import reward_utils
+from metaworld.envs.mujoco.sawyer_xyz.sawyer_xyz_env import SawyerXYZEnv
 from scipy.spatial.transform import Rotation
 
-import mujoco_py
 import numpy as np
 
 initial_states = np.array(
@@ -71,9 +70,11 @@ class SawyerPegV2(SawyerXYZEnv):
     goal_high = (-0.25, 0.7, 0.001)
 
     super().__init__(
-        self.model_name,
+        # self.model_name,
         hand_low=hand_low,
         hand_high=hand_high,
+        render_mode='rgb_array',
+        camera_name='doorview',
     )
 
     self.init_config = {
@@ -108,6 +109,17 @@ class SawyerPegV2(SawyerXYZEnv):
       np.array(goal_high) + np.array([.03, .0, .13])
     )
 
+    obj_low = np.full(3, -np.inf)
+    obj_high = np.full(3, +np.inf)
+    goal_low = self.goal_space.low
+    goal_high = self.goal_space.high
+    gripper_low = -1
+    gripper_high = 1
+    self.observation_space = Box(
+      np.hstack((self._HAND_SPACE.low, gripper_low, obj_low, self._HAND_SPACE.low, gripper_low, goal_low)),
+      np.hstack((self._HAND_SPACE.high, gripper_high, obj_high, self._HAND_SPACE.high, gripper_high, goal_high))
+    )
+
     self.metadata = {
       'render.modes': ['human', 'rgb_array'],
       'video.frames_per_second': int(np.round(1.0 / self.dt))
@@ -118,28 +130,47 @@ class SawyerPegV2(SawyerXYZEnv):
     return os.path.join(
       os.path.dirname(os.path.realpath(__file__)), "metaworld_assets/sawyer_xyz", 'sawyer_peg_insertion_side.xml')
   
-  @property
-  def observation_space(self):
-    obj_low = np.full(3, -np.inf)
-    obj_high = np.full(3, +np.inf)
-    goal_low = self.goal_space.low
-    goal_high = self.goal_space.high
-    gripper_low = -1
-    gripper_high = 1
-    return Box(
-      np.hstack((self._HAND_SPACE.low, gripper_low, obj_low, self._HAND_SPACE.low, gripper_low, goal_low)),
-      np.hstack((self._HAND_SPACE.high, gripper_high, obj_high, self._HAND_SPACE.high, gripper_high, goal_high))
-    )
+  # @property
+  # def observation_space(self):
+  #   obj_low = np.full(3, -np.inf)
+  #   obj_high = np.full(3, +np.inf)
+  #   goal_low = self.goal_space.low
+  #   goal_high = self.goal_space.high
+  #   gripper_low = -1
+  #   gripper_high = 1
+  #   return Box(
+  #     np.hstack((self._HAND_SPACE.low, gripper_low, obj_low, self._HAND_SPACE.low, gripper_low, goal_low)),
+  #     np.hstack((self._HAND_SPACE.high, gripper_high, obj_high, self._HAND_SPACE.high, gripper_high, goal_high))
+  #   )
 
-  def _get_obs(self):
-    obs = super()._get_obs()
+  # def _get_obs(self):
+  #   obs = super()._get_obs()
+  #   # xyz and gripper distance for end effector
+  #   endeff_config = obs[:4]
+  #   obj_pos = self._get_pos_objects()
+  #   obs = np.concatenate([
+  #       endeff_config, obj_pos, self.goal,
+  #   ])
+  #   return obs
+
+  def _preprocess_obs(self, obs): 
     # xyz and gripper distance for end effector
-    endeff_config = obs[:4]
-    obj_pos = self._get_pos_objects()
-    obs = np.concatenate([
-        endeff_config, obj_pos, self.goal,
+    ee_xyzg_obj_xyz = obs[:7]
+    preprocessed_obs = np.concatenate([
+        ee_xyzg_obj_xyz, self.goal,
     ])
-    return obs
+    return preprocessed_obs # (14, ) -> then prev_obs assignment causes the problem 
+
+  def step(self, action): 
+    obs, reward, done, truncated, info = super().step(action)
+    obs = self._preprocess_obs(obs)
+    return obs, reward, done, truncated, info 
+  
+  def reset(self): 
+    obs, info = super().reset() 
+    obs = self._preprocess_obs(obs) 
+    return obs, info
+
 
   def get_next_goal(self):
     if not self._reset_at_goal:
@@ -160,9 +191,10 @@ class SawyerPegV2(SawyerXYZEnv):
     self._target_pos = goal[4:]
     self._end_effector_goal = goal[:3]
 
-    self.sim.model.site_pos[self.model.site_name2id('goal')] = self._target_pos
+    goal_id = self.data.site('goal').id
+    self.model.site_pos[goal_id] = self._target_pos
 
-  @_assert_task_is_set
+  @SawyerXYZEnv._Decorators.assert_task_is_set
   def evaluate_state(self, obs, action):
     obj = obs[4:7]
 
@@ -187,14 +219,16 @@ class SawyerPegV2(SawyerXYZEnv):
     return self._get_site_pos('pegHead')
 
   def _get_quat_objects(self):
-    return Rotation.from_matrix(self.data.get_site_xmat('pegHead')).as_quat()
+    pegHeadxmat = self.data.site('pegHead').xmat.reshape(3, 3)
+    return Rotation.from_matrix(pegHeadxmat).as_quat()
 
   def reset_model(self):
     if not self._reset_at_goal:
       self._reset_hand()
       self.reset_goal()
       pos_box = self.goal_states[0][4:] - np.array([0.03, 0.0, 0.13])
-      self.sim.model.body_pos[self.model.body_name2id('box')] = pos_box
+      box_id = self.data.body('box').id
+      self.model.body_pos[box_id] = pos_box
 
       pos_peg = self.obj_init_pos
       if self.wide_init:
@@ -207,7 +241,8 @@ class SawyerPegV2(SawyerXYZEnv):
         else:
           pos_peg = self.wide_initial_states[np.random.randint(0, self.wide_initial_states.shape[0])] - np.array([-0.1, 0., 0.])
           pos_peg += np.random.uniform(-0.02, 0.02, size=3)
-      elif self.random_init:
+      # elif self.random_init:
+      else:
         pos_peg, _ = np.split(self._get_state_rand_vec(), 2)
         while np.linalg.norm(pos_peg[:2] - pos_box[:2]) < 0.1:
             pos_peg, _ = np.split(self._get_state_rand_vec(), 2)
@@ -219,7 +254,8 @@ class SawyerPegV2(SawyerXYZEnv):
       self._reset_hand()
       self.reset_goal()
       pos_box = self.goal_states[0][4:] - np.array([0.03, 0.0, 0.13])
-      self.sim.model.body_pos[self.model.body_name2id('box')] = pos_box
+      box_id = self.data.body('box').id
+      self.model.body_pos[box_id] = pos_box
 
       goal_pos = self.goal_states[0][4:] - np.array([-0.1, 0., 0.])
       self.obj_init_pos = goal_pos + np.random.uniform(-0.02, 0.02, size=3)
@@ -303,38 +339,3 @@ class SawyerPegV2(SawyerXYZEnv):
       obs = self._get_obs()
 
     return np.linalg.norm(obs[4:7] - obs[11:14]) <= self.TARGET_RADIUS
-
-  def viewer_setup(self):
-    self.viewer.cam.distance = 2.0
-    self.viewer.cam.elevation = -20
-    self.viewer.cam.azimuth = -150
-
-  def _get_viewer(self, mode):
-    self.viewer = self._viewers.get(mode)
-    if self.viewer is None:
-      if mode == 'human':
-        self.viewer = mujoco_py.MjViewer(self.sim)
-      if 'rgb_array' in mode:
-        self.viewer = mujoco_py.MjRenderContextOffscreen(self.sim)
-      self._viewers[mode] = self.viewer
-
-    self.viewer_setup()
-    return self.viewer
-  
-  def render(self, mode='human', height=480, width=640):
-    if mode == 'human':
-      self._get_viewer(mode).render()
-    elif mode == 'rgb_array':
-      return self.sim.render(
-          width, height,
-          mode='offscreen',
-          camera_name='clearview'
-      )[::-1, :, :]
-    else:
-      raise ValueError("mode can only be either 'human' or 'rgb_array'")
-
-  def close(self):
-    if self.viewer is not None:
-      if isinstance(self.viewer, mujoco_py.MjViewer):
-        glfw.destroy_window(self.viewer.window)
-      self.viewer = None

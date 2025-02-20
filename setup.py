@@ -15,8 +15,8 @@ setup(
         # 'termcolor==1.1.0'
         'termcolor'
     ],
-    # dependency_links=[
-    #     'git+https://github.com/rlworkgroup/metaworld.git@master#egg=metaworld',
-    # ],
+    dependency_links=[
+        'git+https://github.com/rlworkgroup/metaworld.git@master#egg=metaworld',
+    ],
     include_package_data=True
 )
