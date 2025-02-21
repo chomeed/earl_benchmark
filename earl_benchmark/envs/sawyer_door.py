@@ -24,6 +24,7 @@ class SawyerDoorV2(SawyerDoorCloseEnvV2):
     obj_high = np.full(3, +np.inf)
     gripper_low = -1
     gripper_high = 1
+    self.initial_states = initial_states
   
 
     super().__init__(
@@ -32,12 +33,30 @@ class SawyerDoorV2(SawyerDoorCloseEnvV2):
       camera_name='doorview',
     )
 
-
-    self.observation_space = spaces.Box(
-      np.hstack((self._HAND_SPACE.low, gripper_low, obj_low, self._HAND_SPACE.low, gripper_low, goal_low)),
-      np.hstack((self._HAND_SPACE.high, gripper_high, obj_high, self._HAND_SPACE.high, gripper_high, goal_high)),
-      dtype=np.float32
-    )
+    ee_vel_low = np.full(3, -np.inf)
+    ee_vel_high = np.full(3, +np.inf)
+    obj_vel_low = np.full(3, -np.inf)
+    obj_vel_high = np.full(3, +np.inf)
+    
+    self.proprioceptive_only = False
+    self.custom_task_goal = None
+    self.add_velocity_info = None
+    
+    if self.add_velocity_info == 'door': # 14 -> 7+3 +7 =17 
+      self.observation_space = spaces.Box(
+        np.hstack((self._HAND_SPACE.low, gripper_low, obj_low, obj_vel_low, self._HAND_SPACE.low, gripper_low, goal_low)),
+        np.hstack((self._HAND_SPACE.high, gripper_high, obj_high, obj_vel_high, self._HAND_SPACE.high, gripper_high, goal_high))
+      )  
+    elif self.add_velocity_info == 'ee_door': # 14 -> 7+6 +7 =20
+      self.observation_space = spaces.Box(
+        np.hstack((self._HAND_SPACE.low, gripper_low, obj_low, ee_vel_low, obj_vel_low, self._HAND_SPACE.low, gripper_low, goal_low)),
+        np.hstack((self._HAND_SPACE.high, gripper_high, obj_high, ee_vel_high, obj_vel_high, self._HAND_SPACE.high, gripper_high, goal_high))
+      )  
+    else: # default
+      self.observation_space = spaces.Box(
+        np.hstack((self._HAND_SPACE.low, gripper_low, obj_low, self._HAND_SPACE.low, gripper_low, goal_low)),
+        np.hstack((self._HAND_SPACE.high, gripper_high, obj_high, self._HAND_SPACE.high, gripper_high, goal_high))
+      )
 
     self.init_config = {
         'obj_init_angle': -np.pi / 3 if not self._reset_at_goal \
@@ -74,7 +93,22 @@ class SawyerDoorV2(SawyerDoorCloseEnvV2):
         'render.modes': ['human', 'rgb_array'],
         'video.frames_per_second': int(np.round(1.0 / self.dt))
     }
+    
+  
+  def set_proprioceptive_only(self, proprioceptive_only):
+    self.proprioceptive_only = proprioceptive_only
+  
+  def set_custom_task_goal(self, custom_task_goal):
+    self.custom_task_goal = custom_task_goal
 
+  def set_velocity_info(self, add_velocity_info):
+    self.add_velocity_info = add_velocity_info
+
+  def _get_vel_objects(self):
+    return self.data.get_geom_xvelp('handle').copy()
+  
+  def get_endeff_vel(self):
+    return self.data.get_body_xvelp('hand').copy()
   @property
   def model_name(self):
     return os.path.join(
@@ -93,8 +127,8 @@ class SawyerDoorV2(SawyerDoorCloseEnvV2):
     obs = self._preprocess_obs(obs)
     return obs, reward, done, truncated, info 
   
-  def reset(self): 
-    obs, info = super().reset() 
+  def reset(self, *args, **kwargs): 
+    obs, info = super().reset(*args, **kwargs) 
     obs = self._preprocess_obs(obs) 
     return obs, info
 
@@ -103,9 +137,11 @@ class SawyerDoorV2(SawyerDoorCloseEnvV2):
   def get_next_goal(self):
     return self.goal_states[0]
 
-  def reset_goal(self, goal=None):
+  def reset_goal(self, goal=None, add_noise = False):
     if goal is None:
       goal = self.get_next_goal()
+    if add_noise: 
+      goal = goal + np.random.normal(scale=0.002, size = goal.shape)
 
     self.goal = goal
     self._target_gripper_distance = goal[3]
@@ -179,8 +215,27 @@ class SawyerDoorV2(SawyerDoorCloseEnvV2):
     
     return [reward, obj_to_target, hand_in_place]
 
-  def is_successful(self, obs=None):
+  def is_successful(self, obs=None, proprioceptive_only=False):
     if obs is None:
       obs = self._get_obs()
+    if self.proprioceptive_only or proprioceptive_only: # consider only gripper
+      return np.linalg.norm(obs[:3] - obs[7:10]) <= 0.05
+    else:
+      return np.linalg.norm(obs[4:7] - obs[11:14]) <= self.TARGET_RADIUS
 
-    return np.linalg.norm(obs[4:7] - obs[11:14]) <= 0.02
+
+  def set_tstar_states(self, hand_pos=None, obj_pos=None):
+    # self.sim.model.site_pos[self.model.site_name2id('goal')] = self._handle_goal
+      if hand_pos is not None:
+        for i in range(hand_pos.shape[0]):
+          hand_id = self.data.site(f"hand_{i+1}").id
+          self.model.site_pos[hand_id] = hand_pos[i]
+      if obj_pos is not None:
+        for i in range(obj_pos.shape[0]):
+          obj_id = self.data.site(f"obj_{i+1}").id
+          self.model.site_pos[obj_id] = obj_pos[i]
+
+      
+    
+  def get_goal_states(self):
+    return self.goal_states.copy()

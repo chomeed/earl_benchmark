@@ -48,19 +48,11 @@ initial_states = np.array(
 
 goal_states = np.array([[0.0, 0.6, 0.2, 1.0, -0.3 + 0.03, 0.6, 0.0 + 0.13]])
 
-# peg positions only
-wide_initial_states = np.array([[-0.3, 0.8, 0.02], [-0.4, 0.8, 0.02], [-0.3, 0.9, 0.02], [-0.4, 0.9, 0.02],
-                                [-0.2, 0.8, 0.02], [-0.2, 0.75, 0.02], [-0.2, 0.9, 0.02], [-0.1, 0.77, 0.02],
-                                [0.0, 0.9, 0.02], [0.1, 0.8, 0.02], [0.15, 0.75, 0.02], [-0.3, 0.4, 0.02],
-                                [-0.4, 0.4, 0.02], [-0.3, 0.45, 0.02], [-0.4, 0.45, 0.02], [-0.2, 0.4, 0.02],
-                                [-0.2, 0.45, 0.02], [-0.2, 0.38, 0.02], [-0.1, 0.42, 0.02], [0.0, 0.45, 0.02],
-                                [0.1, 0.36, 0.02], [0.15, 0.44, 0.02]])
-
 class SawyerPegV2(SawyerXYZEnv):
   max_path_length = int(1e8)
   TARGET_RADIUS = 0.05
 
-  def __init__(self, reward_type='dense', reset_at_goal=False, wide_init=False):
+  def __init__(self, reward_type='dense', reset_at_goal=False):
 
     hand_low = (-0.5, 0.40, 0.05)
     hand_high = (0.5, 1, 0.5)
@@ -84,14 +76,13 @@ class SawyerPegV2(SawyerXYZEnv):
 
     self.initial_states = initial_states
     self.goal_states = goal_states
-    self.wide_initial_states = wide_initial_states
-    self.wide_init = wide_init
 
     self.obj_init_pos = self.init_config['obj_init_pos']
     self.hand_init_pos = self.init_config['hand_init_pos']
     self.peg_head_pos_init = self._get_site_pos('pegHead')
     self.goal = goal_states[0]
     self._target_pos = self.goal[4:]
+
 
     self._partially_observable = False
     self._set_task_called = True
@@ -109,6 +100,9 @@ class SawyerPegV2(SawyerXYZEnv):
       np.array(goal_high) + np.array([.03, .0, .13])
     )
 
+    self.proprioceptive_only = False
+    self.custom_task_goal = None
+
     obj_low = np.full(3, -np.inf)
     obj_high = np.full(3, +np.inf)
     goal_low = self.goal_space.low
@@ -124,6 +118,12 @@ class SawyerPegV2(SawyerXYZEnv):
       'render.modes': ['human', 'rgb_array'],
       'video.frames_per_second': int(np.round(1.0 / self.dt))
     }
+
+  def set_proprioceptive_only(self, proprioceptive_only):
+    self.proprioceptive_only = proprioceptive_only
+  
+  def set_custom_task_goal(self, custom_task_goal):
+    self.custom_task_goal = custom_task_goal
 
   @property
   def model_name(self):
@@ -174,25 +174,49 @@ class SawyerPegV2(SawyerXYZEnv):
 
   def get_next_goal(self):
     if not self._reset_at_goal:
-      num_goals = self.goal_states.shape[0]
-      goal_idx = np.random.randint(0, num_goals)
-      return self.goal_states[goal_idx]
+      if self.custom_task_goal is not None:
+        assert self.custom_task_goal.ndim==2
+        return self.custom_task_goal[np.random.randint(self.custom_task_goal.shape[0])].copy()
+      else:
+        num_goals = self.goal_states.shape[0]
+        goal_idx = np.random.randint(0, num_goals)
+        return self.goal_states[goal_idx]
     else:
-      num_goals = self.initial_states.shape[0]
-      goal_idx = np.random.randint(0, num_goals)
-      return self.initial_states[goal_idx].copy()
+      if self.custom_task_goal is not None:
+        raise NotImplementedError
+      else:
+        num_goals = self.initial_states.shape[0]
+        goal_idx = np.random.randint(0, num_goals)
+        return self.initial_states[goal_idx].copy()
 
-  def reset_goal(self, goal=None):
+  def reset_goal(self, goal=None, add_noise = False):
     if goal is None:
       goal = self.get_next_goal()
 
+    if add_noise: 
+      goal = goal + np.random.normal(scale=0.002, size = goal.shape)
     self.goal = goal
     self._target_gripper_distance = goal[3]
     self._target_pos = goal[4:]
     self._end_effector_goal = goal[:3]
 
+    
+    backward_goal_id = self.data.site('backward_goal').id
     goal_id = self.data.site('goal').id
-    self.model.site_pos[goal_id] = self._target_pos
+
+    if self.proprioceptive_only:
+      # previous
+      # self.sim.model.site_pos[self.model.site_name2id('goal')] = self._end_effector_goal
+      
+      self.model.site_pos[backward_goal_id] = self._end_effector_goal
+      self.model.site_pos[goal_id] = np.array([-10.0, -10.0, -10.0])
+    else:
+      # previous
+      # self.sim.model.site_pos[self.model.site_name2id('goal')] = self._target_pos
+      
+      self.model.site_pos[goal_id] = self._target_pos
+      self.model.site_pos[backward_goal_id] = np.array([-10.0, -10.0, -10.0])
+  
 
   @SawyerXYZEnv._Decorators.assert_task_is_set
   def evaluate_state(self, obs, action):
@@ -231,18 +255,8 @@ class SawyerPegV2(SawyerXYZEnv):
       self.model.body_pos[box_id] = pos_box
 
       pos_peg = self.obj_init_pos
-      if self.wide_init:
-        # with 0.5 prob, choose from the original initial state distribution,
-        # otherwise, choose from the wider distribution
-        if np.random.uniform() < 0.5:
-          pos_peg, _ = np.split(self._get_state_rand_vec(), 2)
-          while np.linalg.norm(pos_peg[:2] - pos_box[:2]) < 0.1:
-              pos_peg, _ = np.split(self._get_state_rand_vec(), 2)
-        else:
-          pos_peg = self.wide_initial_states[np.random.randint(0, self.wide_initial_states.shape[0])] - np.array([-0.1, 0., 0.])
-          pos_peg += np.random.uniform(-0.02, 0.02, size=3)
-      # elif self.random_init:
-      else:
+      # if self.random_init:
+      if True:
         pos_peg, _ = np.split(self._get_state_rand_vec(), 2)
         while np.linalg.norm(pos_peg[:2] - pos_box[:2]) < 0.1:
             pos_peg, _ = np.split(self._get_state_rand_vec(), 2)
@@ -334,8 +348,10 @@ class SawyerPegV2(SawyerXYZEnv):
 
     return [reward, tcp_to_obj, tcp_opened, obj_to_target, object_grasped, in_place, collision_boxes, ip_orig]
 
-  def is_successful(self, obs=None):
+  def is_successful(self, obs=None, proprioceptive_only=False):
     if obs is None:
       obs = self._get_obs()
-
-    return np.linalg.norm(obs[4:7] - obs[11:14]) <= self.TARGET_RADIUS
+    if self.proprioceptive_only or proprioceptive_only: # consider only gripper
+      return np.linalg.norm(obs[:3] - obs[7:10]) <= 0.05
+    else:
+      return np.linalg.norm(obs[4:7] - obs[11:14]) <= self.TARGET_RADIUS

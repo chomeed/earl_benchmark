@@ -14,10 +14,10 @@ class PersistentStateWrapper(Wrapper):
     self._steps_since_reset = 0
     self._num_interventions = 0
 
-  def reset(self):
+  def reset(self, *args, **kwargs):
     self._num_interventions += 1
     self._steps_since_reset = 0
-    return self.env.reset()
+    return self.env.reset(*args, **kwargs)
 
   def step(self, action):
     obs, reward, done, truncated, info = self.env.step(action)
@@ -30,9 +30,9 @@ class PersistentStateWrapper(Wrapper):
 
     return obs, reward, done, truncated, info
 
-  def is_successful(self, obs=None):
+  def is_successful(self, obs=None, proprioceptive_only=False):
     if hasattr(self.env, 'is_successful'):
-        return self.env.is_successful(obs)
+        return self.env.is_successful(obs, proprioceptive_only=proprioceptive_only)
     else:
         return False
 
